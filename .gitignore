@@ -1,55 +1,31 @@
-# Prerequisites
-*.d
-
-# Object files
-*.o
-*.ko
-*.obj
-*.elf
-
-# Linker output
-*.ilk
-*.map
-*.exp
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Libraries
-*.lib
-*.a
-*.la
-*.lo
-
-# Shared objects (inc. Windows DLLs)
-*.dll
-*.so
-*.so.*
-*.dylib
-
-# Executables
+# Go build artifacts
+/bin/
 *.exe
 *.out
-*.app
-*.i*86
-*.x86_64
-*.hex
+*.test
+*.prof
+/pgcpu
 
-# Debug files
-*.dSYM/
-*.su
-*.idb
-*.pdb
+# Go module caches generated in repo roots
+vendor/
 
-# Kernel Module Compile Results
-*.mod*
-*.cmd
-.tmp_versions/
-modules.order
-Module.symvers
-Mkfile.old
-dkms.conf
+# PostgreSQL extension build artifacts
+*.o
+*.so
+*.a
+*.bc
+*.pc
+.deps/
 
-# debug information files
-*.dwo
+# Regression test output
+results/
+tmp_check/
+tmp_check_iso/
+output_iso/
+log/
+regression.diffs
+regression.out
+
+# Editor and OS noise
+.DS_Store
+AGENTS.md

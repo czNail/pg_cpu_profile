@@ -1,0 +1,4 @@
+comment = 'Query-level CPU profiling metadata and last-query node summaries'
+default_version = '1.0'
+module_pathname = '$libdir/pg_cpu_profile'
+relocatable = true
