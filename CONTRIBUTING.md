@@ -5,7 +5,19 @@ Thanks for contributing to `pg_cpu_profile`.
 This project currently has two main parts:
 
 * `pg_cpu_profile`: a PostgreSQL extension written in C
-* `pgcpu`: a Go CLI that drives `perf stat` and reads extension metadata
+* `pgcpu`: a Go CLI that drives `perf stat`, reads extension metadata, and emits text / JSON reports
+
+Current v1 scope:
+
+* top-level query profiling with PostgreSQL executor node summaries
+* `perf stat` counter collection and rule-based diagnosis
+* `pgcpu run` and `pgcpu attach` workflows
+
+Not in v1:
+
+* top-down microarchitecture breakdown percentages
+* per-node PMU attribution
+* real-time node enter / exit tracing
 
 ## Prerequisites
 
@@ -36,6 +48,12 @@ Build the CLI:
 
 ```bash
 go build ./cmd/pgcpu
+```
+
+Run unit tests for the Go-side parsing and reporting logic:
+
+```bash
+go test ./...
 ```
 
 ## Install
@@ -94,6 +112,22 @@ Once PostgreSQL is running with the extension preloaded:
   --sql "SELECT sum(g) FROM generate_series(1,100000) AS g;"
 ```
 
+To inspect an already-running backend instead, enable profiling in that session,
+find its PID, then attach:
+
+```bash
+./pgcpu attach \
+  --dsn "postgresql:///postgres?host=/tmp&port=55432" \
+  --pid <backend_pid>
+```
+
+Notes:
+
+* `pgcpu run` enables profiling in the target session automatically
+* `pgcpu attach` expects the target backend to already be running with `pg_cpu_profile` preloaded
+* `pgcpu run` disables parallel query and JIT by default to keep v1 output easier to interpret
+* `attach` can miss the earliest part of a query lifecycle if the observer starts too late
+
 ## `perf` permissions
 
 On some hosts, `perf stat` is restricted by kernel policy. If the CLI fails
@@ -118,7 +152,9 @@ When contributing:
 
 * follow PostgreSQL coding style for the extension code
 * avoid committing debug-only logging such as temporary `elog(WARNING, ...)`
-* keep v1 scoped to top-level, non-parallel query profiling
+* keep v1 scoped to its current design; do not document top-down percentages or per-node PMU attribution as if they already exist
+* keep query profiling focused on top-level execution; `pgcpu run` currently disables parallel query and JIT by default
+* prefer tests that use deterministic fixtures over assumptions tied to one local CPU / PMU layout
 * add or update regression tests for extension behavior changes
 
 ## Before opening a PR
@@ -128,6 +164,7 @@ Please try to verify at least:
 ```bash
 make
 go build ./cmd/pgcpu
+go test ./...
 make installcheck
 ```
 

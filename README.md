@@ -26,49 +26,49 @@ Unlike traditional tools that only show *what is slow*, this toolkit focuses on:
 
 ### 🔍 Query-level CPU Profiling
 
-* CPU-bound vs IO/wait-bound classification
-* IPC (Instructions Per Cycle)
-* Branch miss rate
-* Cache / LLC miss analysis
+* `pgcpu run` executes a SQL statement and captures PostgreSQL + CPU counters in one report
+* `pgcpu attach` attaches to an already-running backend PID
+* CPU-bound vs blocked/waiting classification based on `task-clock` vs executor time
+* IPC, branch miss rate, cache miss rate, LLC miss rate
 
 ---
 
-### 🧠 Top-Down Microarchitecture Analysis
+### 🧩 PostgreSQL Executor Context
 
-* Frontend Bound
-* Backend Memory Bound
-* Core Bound
-* Bad Speculation
-
----
-
-### 🧩 Executor Node Hotspot Analysis
-
-* Identify hottest plan nodes (SeqScan, HashJoin, etc.)
-* Correlate CPU stalls with executor behavior
+* Active query tracking for opt-in sessions
+* Last-query summary per backend
+* Per-node statistics including rows, loops, and inclusive time
+* Hottest nodes sorted by inclusive executor time
 
 ---
 
 ### 📊 Automatic Diagnosis
 
-* Memory latency issues
-* Branch-heavy execution
-* Low IPC / dispatch overhead
+* Rule-based CPU diagnosis from collected counters
+* Memory-bound tendency hints from low IPC plus cache / LLC miss rates
+* Branch-heavy execution hints from branch miss rate
+* Warnings when counters are unsupported or query metadata is incomplete
 
 ---
 
 ## 🏗 Architecture
 
 ```text
-PostgreSQL (pg_cpu_profile)
-        ↓
-   Query / Node Context
-        ↓
-     pgcpu CLI
-        ↓
-   perf (PMU counters)
-        ↓
- CPU Metrics + Analysis
+                 +----------------------+
+                 |   pg_cpu_profile     |
+                 |  shared memory +     |
+                 | SQL views / hooks    |
+                 +----------+-----------+
+                            |
+            +---------------+----------------+
+            |                                |
+   pgcpu run target session          observer session
+            |                                |
+            +---------------+----------------+
+                            |
+                      perf stat -p <pid>
+                            |
+                      text / JSON report
 ```
 
 ---
@@ -79,14 +79,16 @@ PostgreSQL (pg_cpu_profile)
 
 Provides **semantic context** from inside PostgreSQL:
 
-* Active query tracking
-* Executor node information
-* Per-node statistics (rows, loops, total time)
+* Session-level enable / disable controls
+* `pg_cpu_profile_active` for currently active tracked statements
+* `pg_cpu_profile_last_query` for the last completed tracked statement
+* `pg_cpu_profile_last_query_nodes` for per-node executor summaries
 
 Example views:
 
 ```sql
 SELECT * FROM pg_cpu_profile_active;
+SELECT * FROM pg_cpu_profile_last_query;
 SELECT * FROM pg_cpu_profile_last_query_nodes;
 ```
 
@@ -99,37 +101,46 @@ Handles:
 * Running or attaching to queries
 * Collecting CPU metrics via Linux perf
 * Mapping CPU metrics to query / node context
-* Generating reports
+* Generating text or JSON reports
 
 ---
 
 ## ⚡ Quick Example
 
 ```bash
-pgcpu run --dsn "postgres://..." --sql "SELECT * FROM orders WHERE price > 100;"
+./pgcpu run \
+  --dsn "postgresql:///postgres?host=/tmp&port=5432" \
+  --sql "SELECT sum(g) FROM generate_series(1,10000000) AS g;"
 ```
 
 Output:
 
 ```text
-Query: SELECT * FROM orders WHERE price > 100;
+Query: SELECT sum(g) FROM generate_series(1,10000000) AS g;
+PID: 60929
+Execution Time: 1974.478 ms
+Classification: cpu-bound
 
-Execution Time: 12.4 ms
-CPU Bound: YES
-
-IPC: 0.71
-Branch Miss Rate: 14%
-LLC Miss Rate: HIGH
-
-Top-Down:
-  Backend Memory Bound: 62%
+CPU Metrics
+  task-clock: 1982.886 ms
+  cycles: 8627137466
+  instructions: 31134132137
+  IPC: 3.609
+  branch miss rate: 0.01%
+  cache miss rate: 83.32%
+  LLC miss rate: 89.11%
 
 Hot Nodes:
-  SeqScan(orders): dominant
+  Aggregate#0: 1974.468 ms, rows=1, loops=1
+  Function Scan#1: 1425.067 ms, rows=10000000, loops=1
 
 Diagnosis:
-  - Query is CPU-bound
-  - Bottleneck is memory latency
+  - task-clock is 100% of executor time
+  - highest inclusive executor time is Aggregate (1974.468 ms)
+
+Warnings:
+  - plan_id is unavailable for this query
+  - perf did not support some events: cpu_atom/...
 ```
 
 ---
@@ -148,6 +159,7 @@ Diagnosis:
 * Distributed tracing
 * Automatic SQL tuning
 * General-purpose monitoring
+* Top-down microarchitecture breakdown percentages
 
 ---
 
@@ -201,6 +213,17 @@ If you cannot change the sysctl globally, equivalent capabilities such as
 expects the target backend to have been started in a session where
 `pg_cpu_profile` is preloaded.
 
+`pgcpu run` options:
+
+* `--json <path>` writes the same report as JSON
+* `--disable-parallel` defaults to `true`
+* `--disable-jit` defaults to `true`
+
+`pgcpu attach` options:
+
+* `--pid <pid>` attaches to an existing backend
+* `--json <path>` writes the report as JSON
+
 ---
 
 ## 🛠 Development
@@ -218,6 +241,8 @@ install, testing, and local development workflow details.
 * Node-level summary (rows / loops / time)
 * perf stat integration
 * Basic diagnosis engine
+* Text and JSON reports
+* `run` and `attach` workflows
 
 ---
 
@@ -226,6 +251,7 @@ install, testing, and local development workflow details.
 * Node-level CPU attribution (more precise)
 * perf record + flamegraph
 * JIT awareness
+* Top-down microarchitecture analysis
 
 ---
 
@@ -263,12 +289,15 @@ Instead, we **connect them into a unified system**.
 
 ## ⚠️ Current Limitations
 
-* No real-time node enter/exit tracing
-* Query/node capture currently requires `shared_preload_libraries = 'pg_cpu_profile'`
+* No real-time node enter/exit tracing or per-node PMU attribution yet
+* No top-down frontend/backend/core/speculation percentages in v1
+* Query capture currently requires `shared_preload_libraries = 'pg_cpu_profile'`
 * `pgcpu` requires Linux `perf` access; on hardened hosts you may need a lower
   `kernel.perf_event_paranoid` value or extra capabilities
-* v1 is designed for top-level, non-parallel query profiling
-* CPU model support depends on hardware counter availability
+* v1 is designed around top-level query profiling; `pgcpu run` disables parallel query and JIT by default
+* `attach` can miss early lifecycle state if the observer starts too late
+* `query_id` and `plan_id` availability depends on server configuration and PostgreSQL version
+* The extension stores bounded shared-memory state for tracked sessions and node summaries
 
 ---
 
@@ -287,7 +316,7 @@ Focus areas:
 
 ## 📄 License
 
-MIT License (planned)
+[MIT License](LICENSE)
 
 ---
 
