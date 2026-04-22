@@ -47,6 +47,7 @@ typedef struct PgCpuProfileSlot
 	bool		has_last_query;
 	bool		is_toplevel;
 	int64		capture_id;
+	int64		active_capture_id;
 	int32		pid;
 	Oid			datid;
 	Oid			userid;
@@ -83,6 +84,8 @@ typedef struct PgCpuCaptureContext
 static PgCpuProfileSharedState *pgcpu_state = NULL;
 static bool pgcpu_session_enabled = false;
 static bool pgcpu_proc_exit_registered = false;
+static bool pgcpu_current_query_tracked = false;
+static QueryDesc *pgcpu_tracked_query_desc = NULL;
 static int	pgcpu_nesting_level = 0;
 static int	pgcpu_local_slotno = -1;
 static int	pgcpu_max_nodes_per_query = 64;
@@ -101,6 +104,9 @@ static void pgcpu_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
 static void pgcpu_ExecutorFinish(QueryDesc *queryDesc);
 static void pgcpu_ExecutorEnd(QueryDesc *queryDesc);
 static void pgcpu_on_proc_exit(int code, Datum arg);
+static bool pgcpu_query_is_trackable(QueryDesc *queryDesc, int eflags);
+static bool pgcpu_source_is_unsupported(const char *sourceText);
+static bool pgcpu_slot_is_active(void);
 static bool pgcpu_should_track(QueryDesc *queryDesc, int eflags);
 static bool pgcpu_should_capture(QueryDesc *queryDesc);
 static void pgcpu_set_phase(PgCpuProfileSlot *slot, const char *phase,
@@ -290,7 +296,34 @@ pgcpu_set_phase(PgCpuProfileSlot *slot, const char *phase, const char *activity)
 }
 
 static bool
-pgcpu_should_track(QueryDesc *queryDesc, int eflags)
+pgcpu_source_is_unsupported(const char *sourceText)
+{
+	const char *ptr;
+
+	if (sourceText == NULL)
+		return false;
+	if (strstr(sourceText, "pg_cpu_profile") != NULL)
+		return true;
+
+	ptr = sourceText;
+	while (*ptr == ' ' || *ptr == '\t' || *ptr == '\n' ||
+		   *ptr == '\r' || *ptr == '\f')
+		ptr++;
+
+	if (pg_strncasecmp(ptr, "explain", 7) == 0)
+	{
+		char		next = ptr[7];
+
+		if (next == '\0' || next == ' ' || next == '\t' || next == '\n' ||
+			next == '\r' || next == '\f' || next == '(')
+			return true;
+	}
+
+	return false;
+}
+
+static bool
+pgcpu_query_is_trackable(QueryDesc *queryDesc, int eflags)
 {
 	if (!pgcpu_session_enabled)
 		return false;
@@ -302,29 +335,42 @@ pgcpu_should_track(QueryDesc *queryDesc, int eflags)
 		return false;
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0)
 		return false;
-	if (queryDesc->sourceText != NULL &&
-		strstr(queryDesc->sourceText, "pg_cpu_profile") != NULL)
+	if (pgcpu_source_is_unsupported(queryDesc->sourceText))
 		return false;
 
 	return true;
 }
 
 static bool
-pgcpu_should_capture(QueryDesc *queryDesc)
+pgcpu_slot_is_active(void)
 {
-	if (!pgcpu_session_enabled)
+	bool		active = false;
+
+	if (pgcpu_state == NULL || !ShmemAddrIsValid(pgcpu_state))
 		return false;
-	if (pgcpu_nesting_level != 0)
-		return false;
-	if (queryDesc == NULL || queryDesc->plannedstmt == NULL)
-		return false;
-	if (queryDesc->plannedstmt->commandType == CMD_UTILITY)
-		return false;
-	if (queryDesc->sourceText != NULL &&
-		strstr(queryDesc->sourceText, "pg_cpu_profile") != NULL)
+	if (pgcpu_local_slotno < 0 || pgcpu_local_slotno >= pgcpu_state->max_slots)
 		return false;
 
-	return true;
+	LWLockAcquire(&pgcpu_state->lock, LW_SHARED);
+	active = pgcpu_slot_by_index(pgcpu_local_slotno)->active;
+	LWLockRelease(&pgcpu_state->lock);
+
+	return active;
+}
+
+static bool
+pgcpu_should_track(QueryDesc *queryDesc, int eflags)
+{
+	return pgcpu_query_is_trackable(queryDesc, eflags);
+}
+
+static bool
+pgcpu_should_capture(QueryDesc *queryDesc)
+{
+	return pgcpu_current_query_tracked &&
+		pgcpu_tracked_query_desc == queryDesc &&
+		pgcpu_slot_is_active() &&
+		pgcpu_query_is_trackable(queryDesc, 0);
 }
 
 static const char *
@@ -473,6 +519,13 @@ pgcpu_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
 	bool		track = pgcpu_should_track(queryDesc, eflags);
 
+	if (pgcpu_nesting_level == 0)
+	{
+		pgcpu_current_query_tracked = track;
+		if (!track)
+			pgcpu_tracked_query_desc = NULL;
+	}
+
 	if (track)
 	{
 		queryDesc->query_instr_options |= INSTRUMENT_TIMER;
@@ -502,6 +555,7 @@ pgcpu_ExecutorStart(QueryDesc *queryDesc, int eflags)
 		slot->enabled = true;
 		slot->active = true;
 		slot->is_toplevel = true;
+		slot->active_capture_id = slot->capture_id + 1;
 		slot->pid = MyProcPid;
 		slot->datid = MyDatabaseId;
 		slot->userid = GetUserId();
@@ -515,6 +569,8 @@ pgcpu_ExecutorStart(QueryDesc *queryDesc, int eflags)
 					sizeof(slot->query_text));
 		else
 			slot->query_text[0] = '\0';
+		pgcpu_current_query_tracked = true;
+		pgcpu_tracked_query_desc = queryDesc;
 		LWLockRelease(&pgcpu_state->lock);
 	}
 }
@@ -580,6 +636,7 @@ pgcpu_ExecutorFinish(QueryDesc *queryDesc)
 static void
 pgcpu_ExecutorEnd(QueryDesc *queryDesc)
 {
+	bool		tracked_query = (pgcpu_tracked_query_desc == queryDesc);
 	bool		capture = pgcpu_should_capture(queryDesc);
 
 	if (capture)
@@ -588,6 +645,7 @@ pgcpu_ExecutorEnd(QueryDesc *queryDesc)
 		PgCpuProfileNodeRec *local_nodes;
 		PgCpuProfileSlot *slot;
 		int			slotno = pgcpu_assigned_slotno();
+		bool		has_execution = false;
 
 		local_nodes = palloc0_array(PgCpuProfileNodeRec,
 									pgcpu_state->max_nodes_per_query);
@@ -598,12 +656,29 @@ pgcpu_ExecutorEnd(QueryDesc *queryDesc)
 		if (queryDesc->planstate != NULL)
 			pgcpu_capture_planstate(queryDesc->planstate, &capture_ctx);
 
+		has_execution = (capture_ctx.total_nodes > 0);
+		if (!has_execution && queryDesc->query_instr != NULL)
+			has_execution = !INSTR_TIME_IS_ZERO(queryDesc->query_instr->total);
+
 		LWLockAcquire(&pgcpu_state->lock, LW_EXCLUSIVE);
 		slot = pgcpu_slot_by_index(slotno);
+		if (!has_execution)
+		{
+			slot->active = false;
+			slot->active_capture_id = 0;
+			pgcpu_set_phase(slot, "idle", "idle");
+			LWLockRelease(&pgcpu_state->lock);
+			pfree(local_nodes);
+			goto done;
+		}
 		pgcpu_clear_nodes(slotno);
 		memcpy(pgcpu_slot_nodes_by_index(slotno), local_nodes,
 			   mul_size(capture_ctx.captured_nodes, sizeof(PgCpuProfileNodeRec)));
-		slot->capture_id++;
+		if (slot->active_capture_id > 0)
+			slot->capture_id = slot->active_capture_id;
+		else
+			slot->capture_id++;
+		slot->active_capture_id = 0;
 		slot->has_last_query = true;
 		slot->active = false;
 		slot->pid = MyProcPid;
@@ -623,10 +698,16 @@ pgcpu_ExecutorEnd(QueryDesc *queryDesc)
 		pfree(local_nodes);
 	}
 
+done:
 	if (prev_ExecutorEnd)
 		prev_ExecutorEnd(queryDesc);
 	else
 		standard_ExecutorEnd(queryDesc);
+
+	if (tracked_query)
+		pgcpu_tracked_query_desc = NULL;
+	if (capture)
+		pgcpu_current_query_tracked = false;
 }
 
 static void
@@ -647,6 +728,8 @@ pgcpu_on_proc_exit(int code, Datum arg)
 	pgcpu_clear_nodes(slotno);
 	LWLockRelease(&pgcpu_state->lock);
 	pgcpu_local_slotno = -1;
+	pgcpu_current_query_tracked = false;
+	pgcpu_tracked_query_desc = NULL;
 }
 
 Datum
@@ -682,11 +765,14 @@ pg_cpu_profile_disable(PG_FUNCTION_ARGS)
 	PgCpuProfileSlot *slot;
 
 	pgcpu_session_enabled = false;
+	pgcpu_current_query_tracked = false;
+	pgcpu_tracked_query_desc = NULL;
 
 	LWLockAcquire(&pgcpu_state->lock, LW_EXCLUSIVE);
 	slot = pgcpu_slot_by_index(pgcpu_assigned_slotno());
 	slot->enabled = false;
 	slot->active = false;
+	slot->active_capture_id = 0;
 	slot->pid = MyProcPid;
 	slot->datid = MyDatabaseId;
 	slot->userid = GetUserId();
@@ -715,8 +801,8 @@ pg_cpu_profile_active_data(PG_FUNCTION_ARGS)
 	for (i = 0; i < pgcpu_state->max_slots; i++)
 	{
 		PgCpuProfileSlot *slot = pgcpu_slot_by_index(i);
-		Datum		values[11];
-		bool		nulls[11] = {0};
+		Datum		values[12];
+		bool		nulls[12] = {0};
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -724,22 +810,23 @@ pg_cpu_profile_active_data(PG_FUNCTION_ARGS)
 			continue;
 
 		values[0] = Int32GetDatum(slot->pid);
-		values[1] = ObjectIdGetDatum(slot->datid);
-		values[2] = ObjectIdGetDatum(slot->userid);
-		values[3] = TimestampTzGetDatum(slot->backend_start);
-		values[4] = TimestampTzGetDatum(slot->query_start);
+		values[1] = Int64GetDatum(slot->active_capture_id);
+		values[2] = ObjectIdGetDatum(slot->datid);
+		values[3] = ObjectIdGetDatum(slot->userid);
+		values[4] = TimestampTzGetDatum(slot->backend_start);
+		values[5] = TimestampTzGetDatum(slot->query_start);
 		if (slot->query_id != INT64CONST(0))
-			values[5] = Int64GetDatum(slot->query_id);
-		else
-			nulls[5] = true;
-		if (slot->plan_id != INT64CONST(0))
-			values[6] = Int64GetDatum(slot->plan_id);
+			values[6] = Int64GetDatum(slot->query_id);
 		else
 			nulls[6] = true;
-		values[7] = CStringGetTextDatum(slot->query_text);
-		values[8] = CStringGetTextDatum(slot->activity_state);
-		values[9] = CStringGetTextDatum(slot->profiler_phase);
-		values[10] = BoolGetDatum(slot->is_toplevel);
+		if (slot->plan_id != INT64CONST(0))
+			values[7] = Int64GetDatum(slot->plan_id);
+		else
+			nulls[7] = true;
+		values[8] = CStringGetTextDatum(slot->query_text);
+		values[9] = CStringGetTextDatum(slot->activity_state);
+		values[10] = CStringGetTextDatum(slot->profiler_phase);
+		values[11] = BoolGetDatum(slot->is_toplevel);
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
 	LWLockRelease(&pgcpu_state->lock);

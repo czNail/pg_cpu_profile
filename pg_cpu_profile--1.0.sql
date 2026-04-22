@@ -18,6 +18,7 @@ LANGUAGE C STABLE PARALLEL SAFE;
 CREATE FUNCTION pg_cpu_profile_active_data()
 RETURNS TABLE(
     pid integer,
+    capture_id bigint,
     datid oid,
     usesysid oid,
     backend_start timestamptz,

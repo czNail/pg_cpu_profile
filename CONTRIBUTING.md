@@ -11,11 +11,12 @@ Current v1 scope:
 
 * top-level query profiling with PostgreSQL executor node summaries
 * `perf stat` counter collection and rule-based diagnosis
+* optional `intel_core` Topdown/TMA L1 metrics when the host PMU supports them
 * `pgcpu run` and `pgcpu attach` workflows
 
 Not in v1:
 
-* top-down microarchitecture breakdown percentages
+* cross-vendor, full-fidelity top-down microarchitecture coverage
 * per-node PMU attribution
 * real-time node enter / exit tracing
 
@@ -152,7 +153,7 @@ When contributing:
 
 * follow PostgreSQL coding style for the extension code
 * avoid committing debug-only logging such as temporary `elog(WARNING, ...)`
-* keep v1 scoped to its current design; do not document top-down percentages or per-node PMU attribution as if they already exist
+* keep v1 scoped to its current design; do not document universal top-down coverage or per-node PMU attribution as if they already exist
 * keep query profiling focused on top-level execution; `pgcpu run` currently disables parallel query and JIT by default
 * prefer tests that use deterministic fixtures over assumptions tied to one local CPU / PMU layout
 * add or update regression tests for extension behavior changes

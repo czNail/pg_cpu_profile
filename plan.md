@@ -437,6 +437,8 @@ v1 must collect at least:
 
 Optional when supported by the host:
 
+- `cache-references`
+- `LLC-loads`
 - `LLC-load-misses`
 - top-down metrics
 
@@ -444,11 +446,81 @@ Derived metrics:
 
 - IPC
 - branch miss rate
-- cache miss rate
-- LLC miss rate
+- cache miss ratio from references
+- LLC miss ratio from loads
 - top-down L1 category
 
 All CPU counters belong to the **query level**, not the node level.
+
+### 11.1 Generic ratio semantics
+
+The generic Linux `perf` cache events should be treated conservatively in v1.
+
+Definitions:
+
+- cache miss ratio from references =
+  `cache-misses / cache-references`
+- LLC miss ratio from loads =
+  `LLC-load-misses / LLC-loads`
+
+These ratios are:
+
+- query-level observations only
+- platform-dependent generic PMU ratios
+- useful as additional context
+- **not** sufficient by themselves for strong bottleneck diagnosis
+
+The CLI and JSON should therefore use explicit field names that preserve the
+denominator semantics, so that benchmark results are not misread later.
+
+### 11.2 Confidence and unsupported handling
+
+For ratio-style counters in v1:
+
+- if a required event is unsupported or not counted, do not display the ratio
+- if the ratio is computed from events with clearly degraded perf coverage,
+  still display it but mark it `low confidence`
+
+Recommended confidence inputs from `perf stat -x,`:
+
+- `running/enabled` coverage
+- obvious multiplexing
+
+Recommended initial policy:
+
+- unsupported / not counted => hide metric and emit a warning
+- low `running/enabled` or obvious multiplex => show metric with `low confidence`
+
+### 11.3 PMU profile staging
+
+The CLI should grow a PMU profile concept:
+
+```text
+auto-detect CPU identity -> vendor + family/model + pmu_name -> CPU profile
+```
+
+Recommended v1 behavior:
+
+- default to `generic`
+- `generic` profile may collect and display generic ratios only as additional
+  observations
+- `generic` profile must not enable memory-bound style diagnosis based on those
+  ratios alone
+
+Current implementation-aligned staging:
+
+- default to `generic`
+- `intel_core` may collect `intel_topdown_l1` metrics when the host supports
+  them, but should still gate stronger diagnosis on confidence
+- `amd_zen` may be detected in the report contract, while still falling back to
+  the generic metric template in v1
+
+Remaining staged follow-up:
+
+- broaden vendor-specific profile coverage beyond the current `intel_core` path
+- add better AMD-specific event sets and validation
+- only then expand stronger vendor-specific diagnosis beyond the currently
+  supported cases
 
 ---
 
@@ -458,12 +530,22 @@ The diagnosis engine remains rule-based and explainable.
 
 Acceptable v1 rules:
 
-- low IPC + high cache/LLC miss => memory-bound tendency
-- high branch miss rate => branch-heavy tendency
+- task-clock close to executor time => CPU-dominant execution
+- IPC does not show a pronounced low-IPC pattern
+- IPC is low, but evidence is insufficient for a stronger bottleneck label
 - highest inclusive node time => likely hotspot node
 
 The CLI must clearly state that node summary is executor timing summary, not
 precise CPU-counter attribution.
+
+For v1 correctness:
+
+- diagnosis must not cite generic cache/LLC ratios as proof of memory-bound
+  execution
+- diagnosis should prefer conservative, high-confidence statements over broad
+  heuristics
+- stronger memory-bound reasoning belongs to a later vendor-specific PMU
+  profile phase, not to the default generic profile
 
 ---
 
@@ -476,9 +558,32 @@ Recommended sections:
 - query metadata
 - execution summary
 - CPU metrics
+- additional metrics for platform-dependent generic ratios
 - top-down summary if available
 - hotspot nodes
 - diagnosis
+
+Recommended text structure:
+
+```text
+CPU Metrics
+  task-clock
+  cycles
+  instructions
+  IPC
+  branch miss rate
+
+Additional Metrics (generic perf ratios; platform-dependent)
+  cache miss ratio (cache-misses / cache-references)
+  LLC miss ratio (LLC-load-misses / LLC-loads)
+```
+
+Rules:
+
+- unsupported generic ratios should not be shown in the text body
+- low-confidence generic ratios should remain visible but explicitly say
+  `low confidence`
+- diagnosis should not reference the generic-ratio section
 
 ## 13.2 JSON report
 
@@ -492,6 +597,16 @@ Required top-level groups:
 - diagnosis
 - warnings
 
+Recommended JSON details:
+
+- preserve denominator semantics in field names for generic ratios, for example
+  `cache_miss_rate_from_references`
+- include enough metadata to distinguish:
+  unsupported
+  low-confidence
+  normally collected
+- include the selected PMU profile when profile selection is implemented
+
 Warnings should explicitly call out:
 
 - `query_id` unavailable
@@ -499,6 +614,9 @@ Warnings should explicitly call out:
 - node summary truncated
 - attach race risk
 - parallel query unsupported
+- unsupported perf events
+- low-confidence perf ratios caused by degraded `running/enabled` coverage or
+  obvious multiplexing
 
 ---
 
@@ -552,6 +670,31 @@ top-level, non-parallel query:
 - render JSON output
 - implement diagnosis rules
 - validate on scan/filter/join queries with parallel disabled
+
+## Milestone 6 — Generic ratio hardening
+
+- move generic cache/LLC ratios into an additional-metrics section
+- keep diagnosis independent from generic cache/LLC ratios
+- parse perf coverage quality from `perf stat -x,`
+- hide unsupported ratios
+- mark degraded ratios as `low confidence`
+- validate on fixed regression examples that keep output semantics stable
+
+## Milestone 7 — PMU profile framework
+
+- auto-detect CPU identity in `pgcpu`, not in the extension
+- map identity to a small set of CPU profiles such as `intel_core`, `amd_zen`,
+  or `generic`
+- expose selected CPU profile in text/JSON output
+- keep unsupported profiles on the generic fallback template until
+  vendor-specific events are defined
+
+## Milestone 8 — Vendor-specific diagnosis
+
+- define vendor-specific event sets for Intel and AMD
+- add tests and validation for each profile
+- only then allow stronger memory-bound style diagnosis outside the generic
+  profile
 
 ---
 

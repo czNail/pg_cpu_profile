@@ -29,7 +29,7 @@ Unlike traditional tools that only show *what is slow*, this toolkit focuses on:
 * `pgcpu run` executes a SQL statement and captures PostgreSQL + CPU counters in one report
 * `pgcpu attach` attaches to an already-running backend PID
 * CPU-bound vs blocked/waiting classification based on `task-clock` vs executor time
-* IPC, branch miss rate, cache miss rate, LLC miss rate
+* IPC, branch miss rate, cache miss rate (`cache-misses / cache-references`), LLC miss rate (`LLC-load-misses / LLC-loads`)
 
 ---
 
@@ -44,9 +44,8 @@ Unlike traditional tools that only show *what is slow*, this toolkit focuses on:
 
 ### 📊 Automatic Diagnosis
 
-* Rule-based CPU diagnosis from collected counters
-* Memory-bound tendency hints from low IPC plus cache / LLC miss rates
-* Branch-heavy execution hints from branch miss rate
+* Conservative rule-based CPU diagnosis from collected counters
+* Optional `intel_core` Topdown/TMA L1 percentages when supported by the host PMU
 * Warnings when counters are unsupported or query metadata is incomplete
 
 ---
@@ -118,6 +117,8 @@ Output:
 ```text
 Query: SELECT sum(g) FROM generate_series(1,10000000) AS g;
 PID: 60929
+Capture ID: 3
+CPU Profile: generic
 Execution Time: 1974.478 ms
 Classification: cpu-bound
 
@@ -127,20 +128,22 @@ CPU Metrics
   instructions: 31134132137
   IPC: 3.609
   branch miss rate: 0.01%
-  cache miss rate: 83.32%
-  LLC miss rate: 89.11%
 
-Hot Nodes:
-  Aggregate#0: 1974.468 ms, rows=1, loops=1
-  Function Scan#1: 1425.067 ms, rows=10000000, loops=1
+Additional Metrics (generic perf ratios; platform-dependent)
+  cache miss ratio (cache-misses / cache-references): 83.32%
+  LLC miss ratio (LLC-load-misses / LLC-loads): 89.11%
+
+Hot Nodes (inclusive executor time):
+  Aggregate#0: inclusive=1974.468 ms, rows=1, loops=1
+  Function Scan#1: inclusive=1425.067 ms, rows=10000000, loops=1
 
 Diagnosis:
   - task-clock is 100% of executor time
-  - highest inclusive executor time is Aggregate (1974.468 ms)
+  - top inclusive executor time is Aggregate (1974.468 ms); inclusive time includes descendant work
 
 Warnings:
   - plan_id is unavailable for this query
-  - perf did not support some events: cpu_atom/...
+  - perf does not support some requested events: cpu_atom/...
 ```
 
 ---
@@ -159,7 +162,7 @@ Warnings:
 * Distributed tracing
 * Automatic SQL tuning
 * General-purpose monitoring
-* Top-down microarchitecture breakdown percentages
+* Cross-vendor, full-fidelity top-down microarchitecture coverage
 
 ---
 
@@ -218,11 +221,21 @@ expects the target backend to have been started in a session where
 * `--json <path>` writes the same report as JSON
 * `--disable-parallel` defaults to `true`
 * `--disable-jit` defaults to `true`
+* `pgcpu` auto-detects `vendor + family/model + pmu_name` and maps that to a
+  CPU profile such as `intel_core`, `amd_zen`, or `generic`
+* `generic` keeps diagnosis conservative and treats cache/LLC ratios as
+  additional platform-dependent observations
+* `intel_core` adds vendor-specific Topdown/TMA percentages when `perf` can
+  collect them, and only then allows stronger frontend/backend/speculation
+  style diagnosis
+* `amd_zen` is detected but still falls back to the generic metric template in
+  v1
 
 `pgcpu attach` options:
 
 * `--pid <pid>` attaches to an existing backend
 * `--json <path>` writes the report as JSON
+* CPU profile detection is automatic here as well
 
 ---
 
@@ -241,6 +254,7 @@ install, testing, and local development workflow details.
 * Node-level summary (rows / loops / time)
 * perf stat integration
 * Basic diagnosis engine
+* Optional Intel Topdown/TMA L1 metrics when supported
 * Text and JSON reports
 * `run` and `attach` workflows
 
@@ -250,8 +264,8 @@ install, testing, and local development workflow details.
 
 * Node-level CPU attribution (more precise)
 * perf record + flamegraph
+* Broader vendor-specific PMU / top-down coverage
 * JIT awareness
-* Top-down microarchitecture analysis
 
 ---
 
@@ -290,12 +304,16 @@ Instead, we **connect them into a unified system**.
 ## ⚠️ Current Limitations
 
 * No real-time node enter/exit tracing or per-node PMU attribution yet
-* No top-down frontend/backend/core/speculation percentages in v1
 * Query capture currently requires `shared_preload_libraries = 'pg_cpu_profile'`
 * `pgcpu` requires Linux `perf` access; on hardened hosts you may need a lower
   `kernel.perf_event_paranoid` value or extra capabilities
 * v1 is designed around top-level query profiling; `pgcpu run` disables parallel query and JIT by default
 * `attach` can miss early lifecycle state if the observer starts too late
+* `attach` now warns when it observes parallel workers or parallel plan nodes,
+  but v1 still does not include worker CPU in `perf stat -p <leader pid>`
+* Vendor-specific Topdown/TMA output is currently limited to supported
+  `intel_core` CPUs; `generic` and `amd_zen` stay on the conservative generic
+  metric set in v1
 * `query_id` and `plan_id` availability depends on server configuration and PostgreSQL version
 * The extension stores bounded shared-memory state for tracked sessions and node summaries
 
