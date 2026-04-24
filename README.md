@@ -1,5 +1,7 @@
 # PostgreSQL CPU Profiling Toolkit
 
+English | [简体中文](README.zh-CN.md)
+
 > Understand *why* your PostgreSQL queries are slow — at the CPU level.
 
 ---
