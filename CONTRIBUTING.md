@@ -57,6 +57,10 @@ Run unit tests for the Go-side parsing and reporting logic:
 go test ./...
 ```
 
+This suite includes regressions for `perf stat` CSV parsing, including
+`task-clock` normalization when different `perf` builds emit milliseconds or
+integer nanoseconds for wait-heavy queries.
+
 ## Install
 
 Install the extension artifacts:

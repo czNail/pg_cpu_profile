@@ -100,6 +100,27 @@ func TestParsePerfOutputLegacyEvents(t *testing.T) {
 	}
 }
 
+func TestParsePerfOutputTaskClockIntegerNanoseconds(t *testing.T) {
+	stderr := strings.Join([]string{
+		"442477,,task-clock,442477,100.00,0.000,CPUs utilized",
+		"1370208,,cpu_atom/cycles/,442477,100.00,3.097,GHz",
+		"704465,,cpu_atom/instructions/,442477,100.00,0.51,insn per cycle",
+	}, "\n")
+
+	stat, err := parsePerfOutput(stderr)
+	if err != nil {
+		t.Fatalf("parsePerfOutput returned error: %v", err)
+	}
+
+	assertFloatApprox(t, stat.TaskClockMS, 0.442477, 1e-12, "TaskClockMS")
+	if got, want := stat.Cycles, float64(1370208); got != want {
+		t.Fatalf("Cycles mismatch: got %.0f want %.0f", got, want)
+	}
+	if got, want := stat.Instructions, float64(704465); got != want {
+		t.Fatalf("Instructions mismatch: got %.0f want %.0f", got, want)
+	}
+}
+
 func TestMergeIntelTopdownOutputParsesMetricLines(t *testing.T) {
 	var stat PerfStat
 	mergeIntelTopdownOutput(&stat, strings.Join([]string{
@@ -199,6 +220,37 @@ func TestDeriveMetricsUsesNormalizedTaskClock(t *testing.T) {
 	}
 	if derived.LLCMissRateFromLoadsConfidence != confidenceNormal {
 		t.Fatalf("expected normal LLC confidence, got %q", derived.LLCMissRateFromLoadsConfidence)
+	}
+}
+
+func TestDiagnoseWaitHeavyQueryWithIntegerNanosecondTaskClock(t *testing.T) {
+	perf, err := parsePerfOutput(strings.Join([]string{
+		"442477,,task-clock,442477,100.00,0.000,CPUs utilized",
+		"1370208,,cpu_atom/cycles/,442477,100.00,3.097,GHz",
+		"704465,,cpu_atom/instructions/,442477,100.00,0.51,insn per cycle",
+	}, "\n"))
+	if err != nil {
+		t.Fatalf("parsePerfOutput returned error: %v", err)
+	}
+
+	derived := deriveMetrics(LastQuery{ExecTimeMS: 2001.419283}, perf, cpuProfileGeneric)
+	diag := diagnose([]NodeSummary{
+		{
+			NodeID:               0,
+			NodeType:             "Result",
+			TimeSemantics:        "inclusive",
+			InclusiveTotalTimeMS: 2001.406656,
+		},
+	}, derived, cpuProfileGeneric)
+
+	if derived.CPUUtilizationRatio <= 0 || derived.CPUUtilizationRatio >= 0.7 {
+		t.Fatalf("expected wait-heavy CPU utilization ratio, got %.12f", derived.CPUUtilizationRatio)
+	}
+	if diag.QueryBound != "mainly blocked or waiting" {
+		t.Fatalf("expected wait-heavy diagnosis, got %#v", diag)
+	}
+	if !containsSubstring(diag.Reasons, "task-clock is only 0% of executor time") {
+		t.Fatalf("expected wait-heavy explanation, got %#v", diag.Reasons)
 	}
 }
 

@@ -292,6 +292,7 @@ func parsePerfOutput(stderr string) (PerfStat, error) {
 		collectedEvents:   make(map[string]struct{}),
 		unavailableEvents: make(map[string]struct{}),
 	}
+	var taskClockText string
 
 	for _, line := range strings.Split(stderr, "\n") {
 		line = strings.TrimSpace(line)
@@ -331,6 +332,9 @@ func parsePerfOutput(stderr string) (PerfStat, error) {
 
 		stat.Raw[event] = value
 		if canonical != "" {
+			if canonical == "task-clock" {
+				taskClockText = valueText
+			}
 			stat.collectedEvents[canonical] = struct{}{}
 			if runningPct, ok := parseRunningPct(fields); ok {
 				if current, exists := stat.EventRunningPct[canonical]; !exists || runningPct > current {
@@ -344,7 +348,7 @@ func parsePerfOutput(stderr string) (PerfStat, error) {
 	stat.NotCounted = dedupeStrings(stat.NotCounted)
 	stat.Unavailable = dedupeStrings(append(append([]string{}, stat.Unsupported...), stat.NotCounted...))
 
-	stat.TaskClockMS = normalizeTaskClockMS(stat.Raw["task-clock"])
+	stat.TaskClockMS = normalizeTaskClockMS(taskClockText, stat.Raw["task-clock"])
 	stat.Cycles = perfEventValue(stat.Raw, "cycles")
 	stat.Instructions = perfEventValue(stat.Raw, "instructions")
 	stat.Branches = perfEventValue(stat.Raw, "branches")
@@ -558,13 +562,20 @@ func canonicalPerfEvent(event string) string {
 	return event
 }
 
-func normalizeTaskClockMS(value float64) float64 {
+func normalizeTaskClockMS(rawText string, value float64) float64 {
 	if value <= 0 {
 		return 0
 	}
-	/* Some perf builds emit task-clock in nanoseconds in CSV mode even
-	 * though the human-readable report is shown in milliseconds. */
-	if value >= 1e6 {
+
+	rawText = strings.TrimSpace(rawText)
+	/* Some perf builds emit task-clock in milliseconds with a decimal
+	 * representation, while others emit integer nanoseconds in CSV mode.
+	 * The raw text format is more reliable than a magnitude heuristic
+	 * because very low CPU time can legitimately stay below 1 ms. */
+	if strings.Contains(rawText, ".") {
+		return value
+	}
+	if rawText != "" {
 		return value / 1e6
 	}
 	return value

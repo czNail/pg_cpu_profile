@@ -31,6 +31,7 @@ Unlike traditional tools that only show *what is slow*, this toolkit focuses on:
 * `pgcpu run` executes a SQL statement and captures PostgreSQL + CPU counters in one report
 * `pgcpu attach` attaches to an already-running backend PID
 * CPU-bound vs blocked/waiting classification based on `task-clock` vs executor time
+* Handles `perf stat` CSV variants where `task-clock` is emitted either in milliseconds or integer nanoseconds
 * IPC, branch miss rate, cache miss rate (`cache-misses / cache-references`), LLC miss rate (`LLC-load-misses / LLC-loads`)
 
 ---
@@ -213,6 +214,10 @@ sudo sysctl -w kernel.perf_event_paranoid=-1
 
 If you cannot change the sysctl globally, equivalent capabilities such as
 `CAP_PERFMON` may also work, depending on your environment.
+
+`pgcpu` normalizes `task-clock` across common `perf stat -x,` CSV variants,
+including builds that emit integer nanoseconds instead of milliseconds for
+very low CPU time.
 
 `pgcpu run` enables profiling in the target session automatically. `pgcpu attach`
 expects the target backend to have been started in a session where

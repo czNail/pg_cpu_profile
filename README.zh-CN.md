@@ -31,6 +31,7 @@
 * `pgcpu run` 执行一条 SQL，并在同一份报告中采集 PostgreSQL 与 CPU 计数器
 * `pgcpu attach` 可以附加到一个已经运行中的 backend PID
 * 基于 `task-clock` 与执行器时间，对 CPU 密集与阻塞/等待进行分类
+* 兼容 `perf stat` CSV 中 `task-clock` 以毫秒或整数纳秒输出的不同格式
 * 提供 IPC、分支预测失败率、缓存未命中率（`cache-misses / cache-references`）、LLC 未命中率（`LLC-load-misses / LLC-loads`）
 
 ---
@@ -210,6 +211,9 @@ sudo sysctl -w kernel.perf_event_paranoid=-1
 ```
 
 如果你不能全局修改该 sysctl，也可以视环境使用等价能力，例如 `CAP_PERFMON`。
+
+`pgcpu` 会对常见 `perf stat -x,` CSV 变体中的 `task-clock` 做归一化处理，
+包括某些 `perf` 构建在低 CPU 时间场景下输出整数纳秒而不是毫秒的情况。
 
 `pgcpu run` 会自动在目标会话中开启 profiling。`pgcpu attach` 则要求目标 backend 所在会话已经预加载 `pg_cpu_profile`。
 
